@@ -13,7 +13,7 @@
   "description": "Always see the optimal move in any chess.com game. Guarantees wins almost 100% of the time",
   "content_scripts": [
     {
-      "js": ["scripts/main.js"],
+      "js": ["scripts/main.js", "scripts/automove.js"],
       "matches": [
         "https://www.chess.com/*",
         "https://chess.com/*"

@@ -10,7 +10,6 @@
 2- Enable developer mode by clicking the toggle at the top right.<br>
 3- Click 'Load Unpacked' and finally select the folder where you have cloned or extracted the repo.<br>
 4- Activate the extension and done.<br>
-<br>
 
 <h1>Credits</h1>
 

@@ -6,8 +6,10 @@
 
 <h1>How to install</h1>
 
-Open google chrome and visit 'chrome://extensions'.
-Enable developer mode by clicking the toggle at the top right. Click 'Load Unpacked' and finally select the folder where you have cloned or extracted the repo. Activate the extension and done.
+1- Open google chrome and visit 'chrome://extensions'.
+2- Enable developer mode by clicking the toggle at the top right. 
+3- Click 'Load Unpacked' and finally select the folder where you have cloned or extracted the repo. 
+4- Activate the extension and done.
 <br>
 
 <h1>Credits</h1>

@@ -4,9 +4,13 @@
 <i>Note: this project was developed for learning purposes, I do not condone or encourage cheating in games and this project should help you get better at chess. Non fair play might result in your chess.com account being suspended if you do not use wisely. </i>
 <br>
 
+<h1>How to install</h1>
+
 Open google chrome and visit 'chrome://extensions'.
 Enable developer mode by clicking the toggle at the top right. Click 'Load Unpacked' and finally select the folder where you have cloned or extracted the repo. Activate the extension and done.
+<br>
 
-Credits to: <a href="https://github.com/SaverinOnRails">SaverinOnRails</a>
+<h1>Credits</h1>
+**Credits to:** <a href="https://github.com/SaverinOnRails">SaverinOnRails</a>
 
-Check the original repository: https://github.com/SaverinOnRails/chesscheat
+**Check the original repository:** https://github.com/SaverinOnRails/chesscheat

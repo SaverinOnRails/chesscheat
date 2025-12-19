@@ -12,5 +12,4 @@ Enable developer mode by clicking the toggle at the top right. Click 'Load Unpac
 
 <h1>Credits</h1>
 **Credits to:** <a href="https://github.com/SaverinOnRails">SaverinOnRails</a>
-
 **Check the original repository:** https://github.com/SaverinOnRails/chesscheat

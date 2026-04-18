@@ -1,0 +1,2 @@
+{"sessionId":"55e034","hypothesisId":"H4","location":"main.js:bestmove","message":"schedule_tryPlayAutomove","data":{"playUci":"e5e4"},"timestamp":1776535073181,"runId":"post-fix"}
+{"sessionId":"55e034","hypothesisId":"H5","location":"main.js:queueAutomove","message":"queued","data":{"uci":"e5e4","source":"bestmove"},"timestamp":1776535073182}

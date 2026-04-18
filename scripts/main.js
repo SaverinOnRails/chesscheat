@@ -1,6 +1,10 @@
 //this is quite possibly the most disgusting piece of code i've ever written.
 var hackRunning = false;
 var globalDepth = 15;
+var lastBestMove = "";
+var lastSuggestedUci = "";
+/** When true, each fresh engine bestmove is played automatically (same as N) on your turn. */
+var automoveEnabled = false;
 
 function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(String(value), 10);
@@ -336,12 +340,18 @@ let ui = null;
 let engine = null;
 let getPlays = null;
 
+const CC_ARROW_ANCHOR_CLASS = "cheat-anchor";
+
 function stopHack(uiApi) {
   if (getPlays) clearInterval(getPlays);
   getPlays = null;
   if (engine) engine.terminate?.();
   engine = null;
+  lastBestMove = "";
+  lastSuggestedUci = "";
+  automoveEnabled = false;
   document.querySelectorAll(".cheat-highlight").forEach((element) => element.remove());
+  document.querySelectorAll(`.${CC_ARROW_ANCHOR_CLASS}`).forEach((element) => element.remove());
   hackRunning = false;
   if (uiApi) {
     uiApi.setLoading?.(false);
@@ -352,78 +362,625 @@ function stopHack(uiApi) {
 }
 
 function main() {
-  const chessboard = document.querySelector("wc-chess-board");
+  let chessboard = document.querySelector("wc-chess-board");
   if (!chessboard) {
     return { status: false, error: "Couldn't find chessboard. Open a live game on chess.com first." };
   }
-  var player_colour = chessboard.classList.contains("flipped") ? "b" : "w";
+  const getMyColour = () => (chessboard.classList.contains("flipped") ? "b" : "w");
+
   //generate FEN string from board,
   function getFenString() {
-    let fen_string = ""
-    for (var i = 8; i >= 1; i--) {
-      for (var j = 1; j <= 8; j++) {
-        let position = `${j}${i}`
-        //for every new row on the chessboard
-        if (j == 1 && i != 8) {
-          fen_string += "/"
-        }
-        let piece_in_position = document.querySelectorAll(`.piece.square-${position}`)[0]?.classList ?? null
-        //get piece name by shortest class
-        if (piece_in_position != null) {
-          for (var item of piece_in_position.values()) {
-            if (item.length == 2) {
-              piece_in_position = item
-            }
-          }
-        }
-        //if position is empty
-        if (piece_in_position == null) {
-          //if previous position is empty, sum up numbers
-          let previous_char = fen_string.split("").pop()
-          if (!isNaN(Number(previous_char))) {
-            fen_string = fen_string.substring(0, fen_string.length - 1)
-            fen_string += Number(previous_char) + 1
-          }
-          else {
-            fen_string += "1"
-          }
-        }
-        else if (piece_in_position?.split("")[0] == "b") {
-          fen_string += piece_in_position.split("")[1]
-        }
-        else if (piece_in_position?.split("")[0] == "w") {
-          fen_string += piece_in_position.split("")[1].toUpperCase()
-        }
+    const board = Array.from({ length: 8 }, () => Array.from({ length: 8 }, () => null));
+    const pieces = chessboard.querySelectorAll(".piece");
+    for (const p of pieces) {
+      if (!(p instanceof HTMLElement)) continue;
+      const classes = Array.from(p.classList);
+      const squareClass = classes.find((c) => c.startsWith("square-"));
+      if (!squareClass) continue;
+      const sq = squareClass.slice("square-".length);
+      if (sq.length < 2) continue;
+      const file = Number.parseInt(sq[0], 10);
+      const rank = Number.parseInt(sq[1], 10);
+      if (!Number.isFinite(file) || !Number.isFinite(rank)) continue;
+      if (file < 1 || file > 8 || rank < 1 || rank > 8) continue;
 
-      }
+      const code = classes.find((c) => c.length === 2);
+      if (!code) continue;
+      const fenChar = code[0] === "w" ? code[1].toUpperCase() : code[1];
+      board[8 - rank][file - 1] = fenChar;
     }
-    return fen_string
+
+    let fen = "";
+    for (let r = 0; r < 8; r++) {
+      if (r > 0) fen += "/";
+      let empties = 0;
+      for (let f = 0; f < 8; f++) {
+        const v = board[r][f];
+        if (!v) {
+          empties++;
+        } else {
+          if (empties) fen += String(empties);
+          empties = 0;
+          fen += v;
+        }
+      }
+      if (empties) fen += String(empties);
+    }
+    return fen;
   }
-  let fen_string = getFenString()
-  fen_string += ` ${player_colour}`
-  console.log(fen_string)
+
+  function isProbablyPlacementOnlyFen(firstField) {
+    return /^[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+\/[pnbrqkPNBRQK1-8]+$/.test(
+      firstField || "",
+    );
+  }
+
+  function tryParseValidatedFullFen(raw) {
+    const s = (raw || "").trim();
+    if (!s) return null;
+    const parts = s.split(/\s+/);
+    if (parts.length < 2) return null;
+    if (!isProbablyPlacementOnlyFen(parts[0])) return null;
+    if (parts[1] !== "w" && parts[1] !== "b") return null;
+    // Minimal Stockfish compatibility: ensure 6 fields exist.
+    if (parts.length === 2) return `${parts[0]} ${parts[1]} - - 0 1`;
+    if (parts.length === 3) return `${parts[0]} ${parts[1]} ${parts[2]} - 0 1`;
+    if (parts.length === 4) return `${parts[0]} ${parts[1]} ${parts[2]} ${parts[3]} 0 1`;
+    if (parts.length === 5) return `${parts[0]} ${parts[1]} ${parts[2]} ${parts[3]} ${parts[4]} 1`;
+    return s;
+  }
+
+  function collectFenCandidates() {
+    const candidates = [];
+    const push = (v) => {
+      if (typeof v === "string") {
+        const t = v.trim();
+        if (t) candidates.push(t);
+      }
+    };
+
+    try {
+      push(chessboard.fen);
+    } catch {
+      // ignore
+    }
+    try {
+      push(chessboard.game?.fen);
+      push(chessboard.board?.fen);
+      push(chessboard.chessboard?.fen);
+    } catch {
+      // ignore
+    }
+
+    push(chessboard.getAttribute?.("fen"));
+    push(chessboard.getAttribute?.("data-fen"));
+    push(chessboard.getAttribute?.("position"));
+
+    return candidates;
+  }
+
+  function readValidatedFullFenFromBoard() {
+    for (const c of collectFenCandidates()) {
+      const full = tryParseValidatedFullFen(c);
+      if (full) return full;
+    }
+    return null;
+  }
+
+  function getClockSideToMove() {
+    const el = document.querySelector(".clock-player-turn");
+    if (!(el instanceof HTMLElement)) return "";
+    if (el.classList.contains("clock-white") || el.closest?.(".clock-white")) return "w";
+    if (el.classList.contains("clock-black") || el.closest?.(".clock-black")) return "b";
+    // Some layouts embed color deeper; walk a little.
+    const p = el.closest("[class*='clock-white'], [class*='clock-black']");
+    if (p instanceof HTMLElement) {
+      const cls = String(p.className || "");
+      if (cls.includes("clock-white")) return "w";
+      if (cls.includes("clock-black")) return "b";
+    }
+    return "";
+  }
+
+  function inferSideToMoveFromMoveListCount() {
+    const nodes = document.querySelectorAll(".move-list-move");
+    if (!nodes || !nodes.length) return "";
+    // Each half-move typically adds a node; 0 moves => white to move.
+    return nodes.length % 2 === 0 ? "w" : "b";
+  }
+
+  function isStandardStartPlacement(placement) {
+    return (
+      placement ===
+      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+    );
+  }
+
+  function getSideToMoveHintForPlacement(placement) {
+    const full = readValidatedFullFenFromBoard();
+    if (full) {
+      const stm = full.split(/\s+/)[1];
+      return { stm, confident: true, full };
+    }
+
+    const clock = getClockSideToMove();
+    if (clock) return { stm: clock, confident: true, full: null };
+
+    const ml = inferSideToMoveFromMoveListCount();
+    // When the move list rendered, side-to-move parity is usually reliable on chess.com.
+    if (ml) return { stm: ml, confident: true, full: null };
+
+    if (isStandardStartPlacement(placement)) {
+      return { stm: "w", confident: true, full: null };
+    }
+
+    // Unknown side-to-move: still run analysis, but don't hard-block the extension.
+    return { stm: "w", confident: false, full: null };
+  }
+
+  function getStockfishFenFromPlacement(placement) {
+    const hint = getSideToMoveHintForPlacement(placement);
+    if (hint.full) return hint.full;
+    return `${placement} ${hint.stm} - - 0 1`;
+  }
+
+  function getTurnInfo() {
+    const placement = getFenString();
+    const hint = getSideToMoveHintForPlacement(placement);
+    const my = getMyColour();
+    const result = !hint.confident
+      ? { myTurn: true, confident: false, stm: hint.stm }
+      : { myTurn: hint.stm === my, confident: true, stm: hint.stm };
+
+    return result;
+  }
+
+  function isMyTurn() {
+    return getTurnInfo().myTurn;
+  }
+
+  function getOrCreateAnchor(which) {
+    const id = `cc-anchor-${which}`;
+    let anchor = chessboard.querySelector(`:scope > div#${id}.${CC_ARROW_ANCHOR_CLASS}`);
+    if (anchor && anchor.closest("wc-chess-board") !== chessboard) anchor = null;
+    if (anchor && !document.contains(anchor)) anchor = null;
+    if (anchor) return anchor;
+
+    anchor = document.createElement("div");
+    anchor.id = id;
+    // Use chess.com highlight positioning so `square-XY` does the work.
+    anchor.className = `highlight ${CC_ARROW_ANCHOR_CLASS}`;
+    anchor.style.background = "transparent";
+    anchor.style.opacity = "0";
+    anchor.style.pointerEvents = "none";
+    chessboard.appendChild(anchor);
+    return anchor;
+  }
+
+  function setAnchorSquare(anchor, squarePosition) {
+    // Remove any prior square-* class then apply the new one.
+    Array.from(anchor.classList).forEach((c) => {
+      if (c.startsWith("square-")) anchor.classList.remove(c);
+    });
+    anchor.classList.add(`square-${squarePosition}`);
+  }
+
+  function getCenterClientPoint(el) {
+    const elRect = el.getBoundingClientRect();
+    const x = (elRect.left + elRect.right) / 2;
+    const y = (elRect.top + elRect.bottom) / 2;
+    return { x, y };
+  }
+
+  function dispatchMouseLikeEvent(type, target, point, button) {
+    target.dispatchEvent(
+      new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: point.x,
+        clientY: point.y,
+        button,
+        buttons: button === 2 ? 2 : 1,
+      }),
+    );
+  }
+
+  function dispatchPointerLikeEvent(type, target, point, button) {
+    try {
+      target.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+          clientX: point.x,
+          clientY: point.y,
+          button,
+          buttons: button === 2 ? 2 : 1,
+        }),
+      );
+    } catch {
+      // Some environments disallow PointerEvent construction; mouse events still help.
+    }
+  }
+
+  function elementAt(point) {
+    return document.elementFromPoint(point.x, point.y) || chessboard;
+  }
+
+  function drawChessComBuiltInArrow(fromSquare, toSquare) {
+    const aFrom = getOrCreateAnchor("from");
+    const aTo = getOrCreateAnchor("to");
+    setAnchorSquare(aFrom, fromSquare);
+    setAnchorSquare(aTo, toSquare);
+
+    const fromPt = getCenterClientPoint(aFrom);
+    const toPt = getCenterClientPoint(aTo);
+
+    const fromEl = elementAt(fromPt);
+    const toEl = elementAt(toPt);
+
+    // Simulate chess.com right-click drag arrow gesture.
+    dispatchPointerLikeEvent("pointerdown", fromEl, fromPt, 2);
+    dispatchMouseLikeEvent("mousedown", fromEl, fromPt, 2);
+
+    dispatchPointerLikeEvent("pointermove", toEl, toPt, 2);
+    dispatchMouseLikeEvent("mousemove", toEl, toPt, 2);
+
+    dispatchPointerLikeEvent("pointerup", toEl, toPt, 2);
+    dispatchMouseLikeEvent("mouseup", toEl, toPt, 2);
+  }
+
+  function doSuggestedMoveUci(uciMove) {
+    const move = (uciMove || "").trim();
+    if (move.length < 4 || move === "(none)") return false;
+    const fileMap = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 };
+    const arr = move.split("");
+    const fromSquare = `${fileMap[arr[0]]}${arr[1]}`;
+    const toSquare = `${fileMap[arr[2]]}${arr[3]}`;
+
+    const aFrom = getOrCreateAnchor("from");
+    const aTo = getOrCreateAnchor("to");
+    setAnchorSquare(aFrom, fromSquare);
+    setAnchorSquare(aTo, toSquare);
+
+    const fromPt = getCenterClientPoint(aFrom);
+    const toPt = getCenterClientPoint(aTo);
+    const fromEl = elementAt(fromPt);
+    const toEl = elementAt(toPt);
+
+    // Simulate a normal left-click drag move (matches how users move pieces).
+    dispatchPointerLikeEvent("pointerdown", fromEl, fromPt, 0);
+    dispatchMouseLikeEvent("mousedown", fromEl, fromPt, 0);
+    dispatchPointerLikeEvent("pointermove", toEl, toPt, 0);
+    dispatchMouseLikeEvent("mousemove", toEl, toPt, 0);
+    dispatchPointerLikeEvent("pointerup", toEl, toPt, 0);
+    dispatchMouseLikeEvent("mouseup", toEl, toPt, 0);
+    // Some chess.com boards also rely on click events for selection.
+    dispatchMouseLikeEvent("click", fromEl, fromPt, 0);
+    dispatchMouseLikeEvent("click", toEl, toPt, 0);
+    return true;
+  }
+
+  function tryPlayAutomove(uci) {
+    if (!hackRunning || !automoveEnabled) return;
+    const m = (uci || "").trim();
+    if (m.length < 4 || m === "(none)") return;
+    if (!document.contains(chessboard)) {
+      const nextBoard = document.querySelector("wc-chess-board");
+      if (!nextBoard) return;
+      chessboard = nextBoard;
+    }
+    doSuggestedMoveUci(m);
+  }
+
+  /**
+   * Engine `bestmove` runs outside a user gesture; a short deferral avoids stacking with draw/layout.
+   * Do NOT use this for the `A` key — play synchronously there so transient user activation matches `N`.
+   */
+  function queueAutomove(uci) {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        tryPlayAutomove(uci);
+      }, 0);
+    });
+  }
+
+  function onGlobalKeydown(e) {
+    if (!hackRunning) return;
+    if (e.defaultPrevented) return;
+    const t = e.target;
+    if (t instanceof HTMLElement) {
+      const tag = t.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || t.isContentEditable) return;
+    }
+    if (e.key === "a" || e.key === "A") {
+      e.preventDefault();
+      automoveEnabled = !automoveEnabled;
+      if (automoveEnabled) {
+        const pendingUci = lastBestMove;
+        ui?.setHint?.(pendingUci ? `Auto · Move: ${pendingUci}` : "Auto");
+        if (pendingUci) {
+          if (!document.contains(chessboard)) {
+            const nextBoard = document.querySelector("wc-chess-board");
+            if (nextBoard) chessboard = nextBoard;
+          }
+          removeChessComDrawnArrows();
+          tryPlayAutomove(pendingUci);
+        }
+      } else {
+        ui?.setMove?.(lastBestMove || "");
+      }
+      return;
+    }
+    if (e.key === "n" || e.key === "N") {
+      if (!lastBestMove) return;
+      if (!document.contains(chessboard)) {
+        const nextBoard = document.querySelector("wc-chess-board");
+        if (!nextBoard) return;
+        chessboard = nextBoard;
+      }
+      e.preventDefault();
+      doSuggestedMoveUci(lastBestMove);
+    }
+  }
+
+  document.addEventListener("keydown", onGlobalKeydown, { capture: true });
+
+  function pieceCodeOnSquare(squareNum) {
+    const el = chessboard.querySelector(`.piece.square-${squareNum}`);
+    if (!(el instanceof HTMLElement)) return null;
+    return Array.from(el.classList).find((c) => c.length === 2) || null;
+  }
+
+  function uciStillMatchesBoard(uci) {
+    const m = (uci || "").trim();
+    if (m.length < 4) return false;
+    const fileMap = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 };
+    const fromSq = `${fileMap[m[0]]}${m[1]}`;
+    const toSq = `${fileMap[m[2]]}${m[3]}`;
+    const fromPiece = pieceCodeOnSquare(fromSq);
+    const toPiece = pieceCodeOnSquare(toSq);
+    if (!fromPiece) return false;
+    // After the suggested move, the moving piece should be on `to` with same color/type.
+    return toPiece === fromPiece;
+  }
+
+  function uciFromSquareNum(uci) {
+    const m = (uci || "").trim();
+    if (m.length < 4) return "";
+    const fileMap = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 };
+    return `${fileMap[m[0]]}${m[1]}`;
+  }
+
+  function removeChessComDrawnArrows() {
+    // chess.com user arrows are SVG elements; they commonly include `arrow` in class names.
+    // This avoids dispatching Escape (which can interfere with premove UI).
+    const root = document.contains(chessboard) ? chessboard : document.querySelector("wc-chess-board");
+    if (!root) return;
+    root.querySelectorAll("svg [class*='arrow'], svg .arrow, g[class*='arrow']").forEach((el) => {
+      try {
+        el.remove();
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  let fen_string = getStockfishFenFromPlacement(getFenString());
+  /** Piece placement (first FEN field) when we last sent `go` — stale bestmoves must match this. */
+  let placementAtGoStart = getFenString();
   engine = new Worker("/bundles/app/js/vendor/jschessengine/stockfish.asm.1abfa10c.js")
   // Try to get some early responsiveness signals from Stockfish.
   engine.postMessage("uci");
   engine.postMessage("isready");
   engine.postMessage(`position fen ${fen_string}`)
-  engine.postMessage("go wtime 300000 btime 300000 winc 2000 binc 2000");
   engine.postMessage(`go depth ${globalDepth}`)
-  //listen for when moves are made 
-  getPlays = setInterval(() => {
-    let new_fen_string = getFenString()
-    new_fen_string += ` ${player_colour}`
-    if (new_fen_string != fen_string) {
-      fen_string = new_fen_string
-      engine.postMessage(`position fen ${fen_string}`)
-      engine.postMessage("go wtime 300000 btime 300000 winc 2000 binc 2000");
-      console.log(globalDepth);
-      if (ui) {
-        ui.setLoading(true);
+
+  // Move detection: observe board DOM changes rather than polling every 250ms.
+  let pending = 0;
+  let suppressAnalysisMyTurn = false;
+  let baselinePlacementFen = getFenString();
+  let prevIsMyTurn = getTurnInfo().myTurn;
+  let suppressSnapshotPlacement = "";
+  /** After we play a suggested move, the board may not expose reliable clocks; freeze until pieces change again. */
+  let awaitingOpponentReply = false;
+  let placementAfterOurMove = "";
+  const scheduleRecalc = () => {
+    if (pending) window.clearTimeout(pending);
+    pending = window.setTimeout(() => {
+      pending = 0;
+      if (!document.contains(chessboard)) {
+        const nextBoard = document.querySelector("wc-chess-board");
+        if (!nextBoard) return;
+        chessboard = nextBoard;
       }
-      engine.postMessage(`go depth ${globalDepth}`)
+      const placementNow = getFenString();
+
+      if (awaitingOpponentReply) {
+        if (placementNow === placementAfterOurMove) {
+          removeChessComDrawnArrows();
+          lastBestMove = "";
+          lastSuggestedUci = "";
+          try {
+            engine.postMessage("stop");
+          } catch {
+            // ignore
+          }
+          if (ui) {
+            ui.setLoading(false);
+            ui.setMove?.("");
+          }
+          const silentFen = getStockfishFenFromPlacement(placementNow);
+          if (silentFen !== fen_string) fen_string = silentFen;
+          prevIsMyTurn = getTurnInfo().myTurn;
+          return;
+        }
+        awaitingOpponentReply = false;
+        placementAfterOurMove = "";
+        suppressAnalysisMyTurn = false;
+        lastSuggestedUci = "";
+        lastBestMove = "";
+        removeChessComDrawnArrows();
+        baselinePlacementFen = placementNow;
+      }
+
+      const turn = getTurnInfo();
+      const myTurnNow = turn.myTurn;
+      if (turn.confident && myTurnNow !== prevIsMyTurn) {
+        // New turn phase: reset suppression baseline.
+        suppressAnalysisMyTurn = false;
+        awaitingOpponentReply = false;
+        placementAfterOurMove = "";
+        baselinePlacementFen = getFenString();
+        prevIsMyTurn = myTurnNow;
+      }
+
+      const opponentTurn = turn.confident && !myTurnNow;
+
+      // We already executed the suggested move (piece left the `from` square): wait for opponent
+      // before any new analysis, even if clocks / move-list turn hints are flaky.
+      if (
+        !awaitingOpponentReply &&
+        suppressAnalysisMyTurn &&
+        (lastSuggestedUci || "").trim().length >= 4
+      ) {
+        const fromN = uciFromSquareNum(lastSuggestedUci);
+        if (fromN && !pieceCodeOnSquare(fromN)) {
+          awaitingOpponentReply = true;
+          placementAfterOurMove = placementNow;
+          suppressAnalysisMyTurn = false;
+          lastBestMove = "";
+          lastSuggestedUci = "";
+          removeChessComDrawnArrows();
+          try {
+            engine.postMessage("stop");
+          } catch {
+            // ignore
+          }
+          if (ui) {
+            ui.setLoading(false);
+            ui.setMove?.("");
+          }
+          const silentFen = getStockfishFenFromPlacement(placementNow);
+          if (silentFen !== fen_string) fen_string = silentFen;
+          prevIsMyTurn = turn.myTurn;
+          return;
+        }
+      }
+
+      // If suppression is active, clear it when the board changes in a way that invalidates the
+      // last suggested UCI match. This catches opponent replies even when clocks/move-list aren't scrapable.
+      if (suppressAnalysisMyTurn) {
+        const placementChanged = Boolean(suppressSnapshotPlacement) && placementNow !== suppressSnapshotPlacement;
+        const uci = (lastSuggestedUci || "").trim();
+        const mismatch =
+          placementChanged &&
+          uci.length >= 4 &&
+          !uciStillMatchesBoard(uci);
+        if (mismatch) {
+          suppressAnalysisMyTurn = false;
+          lastSuggestedUci = "";
+          baselinePlacementFen = placementNow;
+        }
+      }
+
+      // If it's not our turn, board DOM can still change due to premove UI.
+      // Still update `fen_string` silently so that when it becomes our turn again,
+      // `nextFen !== fen_string` and we actually schedule a new search.
+      if (opponentTurn) {
+        awaitingOpponentReply = false;
+        placementAfterOurMove = "";
+        removeChessComDrawnArrows();
+        lastBestMove = "";
+        lastSuggestedUci = "";
+        try {
+          engine.postMessage("stop");
+        } catch {
+          // ignore
+        }
+        if (ui) {
+          ui.setLoading(false);
+          ui.setMove?.("");
+        }
+        const silentFen = getStockfishFenFromPlacement(placementNow);
+        if (silentFen !== fen_string) fen_string = silentFen;
+        return;
+      }
+
+      const suggestedFromSq = lastSuggestedUci ? uciFromSquareNum(lastSuggestedUci) : "";
+      const suggestedFromEmpty = Boolean(suggestedFromSq) && !pieceCodeOnSquare(suggestedFromSq);
+      if (
+        suppressAnalysisMyTurn &&
+        placementNow !== baselinePlacementFen &&
+        lastSuggestedUci &&
+        suggestedFromEmpty &&
+        !uciStillMatchesBoard(lastSuggestedUci)
+      ) {
+        // User changed the board on their turn after we showed a suggestion (e.g. they moved).
+        // Don't keep re-analyzing / re-drawing until opponent replies.
+        removeChessComDrawnArrows();
+        lastBestMove = "";
+        lastSuggestedUci = "";
+        try {
+          engine.postMessage("stop");
+        } catch {
+          // ignore
+        }
+        if (ui) {
+          ui.setLoading(false);
+          ui.setMove?.("");
+        }
+        return;
+      }
+
+      const nextFen = getStockfishFenFromPlacement(placementNow);
+      if (nextFen === fen_string) return;
+      if (suppressAnalysisMyTurn) {
+        return;
+      }
+      fen_string = nextFen;
+      baselinePlacementFen = placementNow;
+      placementAtGoStart = placementNow;
+      engine.postMessage(`position fen ${fen_string}`);
+      if (ui) ui.setLoading(true);
+      engine.postMessage(`go depth ${globalDepth}`);
+    }, 120);
+  };
+
+  const observer = new MutationObserver((mutations) => {
+    // Only react to changes that plausibly move/add/remove pieces.
+    for (const m of mutations) {
+      if (m.type === "attributes") {
+        const t = m.target;
+        if (t instanceof HTMLElement && t.classList.contains("piece")) {
+          scheduleRecalc();
+          return;
+        }
+        continue;
+      }
+      if (m.type === "childList") {
+        const nodes = [...m.addedNodes, ...m.removedNodes];
+        for (const n of nodes) {
+          if (!(n instanceof HTMLElement)) continue;
+          if (n.classList?.contains("piece") || n.querySelector?.(".piece")) {
+            scheduleRecalc();
+            return;
+          }
+        }
+      }
     }
-  }, 250)
+  });
+  observer.observe(chessboard, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ["class"],
+  });
+  // Fallback: periodic check in case chess.com mutates outside observed subtree.
+  getPlays = setInterval(scheduleRecalc, 5000);
   engine.onmessage = function(event) {
     if (typeof event.data === "string") {
       if (event.data === "uciok" || event.data === "readyok") {
@@ -436,30 +993,64 @@ function main() {
       const bestMove = event.data.split(' ')[1];
       // Use the best move in your application
       char_map = { "a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8 }
-      console.log('Best move:', bestMove);
+      const move = (bestMove || "").trim();
+      const placementNow = getFenString();
+      if (move.length >= 4 && move !== "(none)" && placementNow !== placementAtGoStart) {
+        // Board changed while Stockfish was thinking — do not apply a stale line.
+        return;
+      }
+      lastBestMove = move;
+      const turnNow = getTurnInfo();
+      if (turnNow.confident && !turnNow.myTurn) {
+        // Ignore results when we're confident it's not our turn.
+        lastBestMove = "";
+        return;
+      }
+      if (awaitingOpponentReply) {
+        lastBestMove = "";
+        return;
+      }
+      if (suppressAnalysisMyTurn) {
+        lastBestMove = "";
+        return;
+      }
+      const fromSqNum =
+        move.length >= 4 && move !== "(none)" ? uciFromSquareNum(move) : "";
+      if (fromSqNum && !pieceCodeOnSquare(fromSqNum)) {
+        // Suggestion no longer legal on the live board (e.g. user moved during calculation).
+        lastBestMove = "";
+        return;
+      }
       if (ui) {
         ui.setLoading(false);
         ui.setToggleText("Stop");
-        ui.setMove?.(bestMove);
+        ui.setMove?.(move);
+        if (automoveEnabled) {
+          ui.setHint?.(`Auto · Move: ${move}`);
+        }
       }
-      //create cheat squares on the board
-      previous_cheat_squares = document.querySelectorAll(".cheat-highlight").forEach((element) => {
-        //remove all previous cheat squares
-        element.remove()
-      })
-      bestMove_array = bestMove.split("")
-      initial_position = `${char_map[bestMove_array[0]]}${bestMove_array[1]}`
-      final_position = `${char_map[bestMove_array[2]]}${bestMove_array[3]}`
 
-      initial_highlight = document.createElement("div");
-      initial_highlight.className = `highlight cheat-highlight square-${initial_position}`
-      initial_highlight.style = "background:red;opacity:0.5"
-
-      final_highlight = document.createElement("div");
-      final_highlight.className = `highlight cheat-highlight square-${final_position}`
-      final_highlight.style = "background:red;opacity:0.5"
-      chessboard.appendChild(initial_highlight)
-      chessboard.appendChild(final_highlight)
+      // Draw chess.com-like arrow overlay for the best move.
+      if (!document.contains(chessboard)) {
+        const nextBoard = document.querySelector("wc-chess-board");
+        if (!nextBoard) return;
+        chessboard = nextBoard;
+      }
+      document.querySelectorAll(".cheat-highlight").forEach((element) => element.remove());
+      if (move.length < 4 || move === "(none)") return;
+      const bestMove_array = move.split("");
+      const initial_position = `${char_map[bestMove_array[0]]}${bestMove_array[1]}`;
+      const final_position = `${char_map[bestMove_array[2]]}${bestMove_array[3]}`;
+      if (!automoveEnabled) {
+        drawChessComBuiltInArrow(initial_position, final_position);
+      }
+      lastSuggestedUci = move;
+      suppressAnalysisMyTurn = true;
+      baselinePlacementFen = getFenString();
+      suppressSnapshotPlacement = baselinePlacementFen;
+      if (automoveEnabled) {
+        queueAutomove(move);
+      }
     }
   }
   return { status: true }
@@ -467,7 +1058,6 @@ function main() {
 }
 
 function startHack(uiApi) {
-  console.log(hackRunning);
   if (hackRunning == true) {
     return;
   }

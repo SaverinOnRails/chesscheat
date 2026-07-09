@@ -3,7 +3,7 @@ var hackRunning = false;
 var globalDepth = 15;
 function main() {
   const chessboard = document.querySelector("wc-chess-board");
-  var player_colour = chessboard.classList.contains("flipped") ? "b" : "w";
+  const player_colour = chessboard.classList.contains("flipped") ? "b" : "w";
   //generate FEN string from board,
   function getFenString() {
     let fen_string = ""
@@ -26,7 +26,7 @@ function main() {
         //if position is empty
         if (piece_in_position == null) {
           //if previous position is empty, sum up numbers
-          let previous_char = fen_string.split("").pop()
+          let previous_char = fen_string.at(-1)
           if (!isNaN(Number(previous_char))) {
             fen_string = fen_string.substring(0, fen_string.length - 1)
             fen_string += Number(previous_char) + 1
@@ -52,7 +52,7 @@ function main() {
   const engine = new Worker("/bundles/app/js/vendor/jschessengine/stockfish.asm.1abfa10c.js")
   engine.postMessage(`position fen ${fen_string}`)
   engine.postMessage('go wtime 300000 btime 300000 winc 2000 binc 2000');
-  engine.postMessage("go depth ${globalDepth}")
+  engine.postMessage(`go depth ${globalDepth}`)
   //listen for when moves are made 
   var getPlays = setInterval(() => {
     let new_fen_string = getFenString()
@@ -61,8 +61,7 @@ function main() {
       fen_string = new_fen_string
       engine.postMessage(`position fen ${fen_string}`)
       engine.postMessage('go wtime 300000 btime 300000 winc 2000 binc 2000');
-      console.log(globalDepth);
-      engine.postMessage("go depth ${globalDepth}")
+      engine.postMessage(`go depth ${globalDepth}`)
     }
   })
   engine.onmessage = function(event) {

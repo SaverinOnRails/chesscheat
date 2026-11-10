@@ -31,6 +31,9 @@ Open any game on chess.com. A small panel appears above the board.
   <li><b>Start Hack</b> loads the engine and analyses the board. The panel shows the move, the evaluation (from White's point of view, like chess.com's own eval bar) and the search depth as the engine deepens. Click again to stop.</li>
   <li>A <b>red arrow</b> is the best move for you. A <b>blue arrow</b> is the reply the engine expects from your opponent while they are thinking.</li>
   <li><b>Depth</b> controls how deep the engine searches. 15 answers within a second or two; 20 takes several seconds; 25 and above can take minutes per move. Changing it re-analyses the current position.</li>
+  <li><b>Flash key</b> (default <code>`</code>, the key left of 1): press it during a game to flash the best move on the board for a moment. Click the <b>Flash</b> button in the panel to pick another key.</li>
+  <li><b>Hide until key</b> keeps the board clean: no arrow is drawn and the panel does not name the move. The flash key shows it on demand.</li>
+  <li>Depth, the flash key and the hide setting are remembered between page loads.</li>
 </ul>
 
 <h1>How it works:</h1>

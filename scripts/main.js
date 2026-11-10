@@ -33,6 +33,9 @@
   const PANEL_POLL_MS = 500; // chess.com is a single-page app: re-attach the panel as needed
   const COLOUR_OWN = '#e5342b';
   const COLOUR_OPPONENT = '#48c1f9';
+  const FLASH_MS = 700; // how long a key-triggered flash of the move stays on the board
+  const SETTINGS_KEY = 'chesscheat.settings';
+  const DEFAULT_SETTINGS = { depth: DEFAULT_DEPTH, hidden: false, key: '`' };
 
   const FILES = 'abcdefgh';
   const squareCode = (square) => `${FILES.indexOf(square[0]) + 1}${square[1]}`; // "e4" -> "54"
@@ -382,10 +385,37 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Settings, kept in localStorage on chess.com so they survive reloads
+  // ---------------------------------------------------------------------------
+
+  const settings = { ...DEFAULT_SETTINGS };
+
+  function loadSettings() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+      if (Number.isFinite(stored.depth)) {
+        settings.depth = Math.min(MAX_DEPTH, Math.max(MIN_DEPTH, Math.round(stored.depth)));
+      }
+      if (typeof stored.hidden === 'boolean') settings.hidden = stored.hidden;
+      if (typeof stored.key === 'string' && stored.key) settings.key = stored.key;
+    } catch (error) {
+      // no storage or unreadable settings: keep the defaults
+    }
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (error) {
+      // storage unavailable: settings last for this page only
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Panel
   // ---------------------------------------------------------------------------
 
-  const ui = { panel: null, button: null, depth: null, status: null, engine: null };
+  const ui = { panel: null, button: null, depth: null, hidden: null, key: null, status: null, engine: null, capturing: false };
 
   function buildPanel() {
     const panel = document.createElement('div');
@@ -403,10 +433,24 @@
     depth.min = String(MIN_DEPTH);
     depth.max = String(MAX_DEPTH);
     depth.step = '1';
-    depth.value = String(DEFAULT_DEPTH);
+    depth.value = String(settings.depth);
     depth.title = `Search depth. ${DEFAULT_DEPTH} answers within a second or two; 20 and above can take much longer.`;
     depth.addEventListener('change', onDepthChange);
     label.append(depth);
+
+    const hiddenLabel = document.createElement('label');
+    const hidden = document.createElement('input');
+    hidden.type = 'checkbox';
+    hidden.checked = settings.hidden;
+    hidden.title = 'Draw nothing on the board until you press the flash key.';
+    hidden.addEventListener('change', onHiddenChange);
+    hiddenLabel.append(hidden, ' Hide until key');
+
+    const key = document.createElement('button');
+    key.type = 'button';
+    key.className = 'cheat-key';
+    key.title = 'Press this key during a game to flash the best move on the board for a moment. Click to change it.';
+    key.addEventListener('click', beginKeyCapture);
 
     const status = document.createElement('span');
     status.className = 'cheat-status';
@@ -415,8 +459,9 @@
     const engine = document.createElement('span');
     engine.className = 'cheat-engine';
 
-    panel.append(button, label, status, engine);
-    Object.assign(ui, { panel, button, depth, status, engine });
+    panel.append(button, label, hiddenLabel, key, status, engine);
+    Object.assign(ui, { panel, button, depth, hidden, key, status, engine });
+    renderKeyButton();
   }
 
   function ensurePanel() {
@@ -446,8 +491,36 @@
   }
 
   function onDepthChange() {
-    ui.depth.value = String(currentDepth());
+    settings.depth = currentDepth();
+    ui.depth.value = String(settings.depth);
+    saveSettings();
     if (session) checkPosition(true);
+  }
+
+  function onHiddenChange() {
+    settings.hidden = ui.hidden.checked;
+    saveSettings();
+    if (!session) return;
+    clearPersistent();
+    if (!settings.hidden && session.best) session.persistent = drawMove(session.best.move, session.best.own);
+    if (session.lastResult) report(session.lastResult);
+  }
+
+  function keyLabel(key) {
+    if (key === ' ') return 'Space';
+    return key.length === 1 ? key.toUpperCase() : key;
+  }
+
+  function renderKeyButton() {
+    if (!ui.key) return;
+    ui.key.textContent = ui.capturing ? 'Press a key…' : `Flash: ${keyLabel(settings.key)}`;
+    ui.key.classList.toggle('capturing', ui.capturing);
+  }
+
+  function beginKeyCapture() {
+    ui.capturing = true;
+    renderKeyButton();
+    ui.key.blur(); // so the chosen key is not also read as a click on this button
   }
 
   // UCI scores are from the side to move; show them from White's side like chess.com's eval bar.
@@ -483,10 +556,12 @@
       settleTimer: null,
       lastFen: null,
       lastInfo: null,
-      shown: null,
+      lastResult: null, // what the status line currently reports, for re-rendering
+      best: null, // latest move from the engine: { move, own, key }
+      persistent: null, // drawing handle for the move kept on the board
+      flash: null, // drawing handle for a key-triggered flash
+      flashTimer: null,
       sanCache: {},
-      markingKeys: [],
-      highlightEls: [],
       domState: { grid: null, turn: 'w', ep: '-' },
     };
     ui.button.textContent = 'Stop Hack';
@@ -570,7 +645,7 @@
     if (!session || request.fen !== session.lastFen) return;
     session.lastInfo = info;
     showMove(info.move, request);
-    setStatus(describe(request, info.move, info, `depth ${info.depth}/${request.depth}`));
+    report({ request, move: info.move, info, progress: `depth ${info.depth}/${request.depth}` });
   }
 
   function onBestMove(request, move) {
@@ -581,69 +656,156 @@
       return;
     }
     showMove(move, request);
-    setStatus(describe(request, move, session.lastInfo, `depth ${request.depth} done`));
+    report({ request, move, info: session.lastInfo, progress: `depth ${request.depth} done` });
   }
 
-  function describe(request, move, info, progress) {
+  function report(result) {
+    session.lastResult = result;
+    setStatus(describe(result));
+  }
+
+  function describe({ request, move, info, progress }) {
     const own = request.turn === request.playingAs;
+    const evalText = info ? formatEval(info, request.turn) : '';
+    const tail = `${evalText ? ` · ${evalText}` : ''} · ${progress}`;
+    if (settings.hidden) {
+      return `${own ? 'Your move' : "Opponent's move"} · press ${keyLabel(settings.key)} to flash${tail}`;
+    }
     if (!(move in session.sanCache)) session.sanCache[move] = sanFor(session.board, move);
     const san = session.sanCache[move];
     const label = own ? 'Your best move' : "Opponent's likely reply";
-    const evalText = info ? formatEval(info, request.turn) : '';
-    return `${label}: ${san ? `${san} (${move})` : move}${evalText ? ` · ${evalText}` : ''} · ${progress}`;
+    return `${label}: ${san ? `${san} (${move})` : move}${tail}`;
   }
 
+  // Remembers the latest move and, unless the board is kept hidden, keeps it drawn.
   function showMove(move, request) {
     const own = request.turn === request.playingAs;
     const key = `${move.slice(0, 4)}|${own}`;
-    if (session.shown === key) return;
-    clearMarks();
-    session.shown = key;
+    if (session.best && session.best.key === key) return;
+    session.best = { move, own, key };
+    clearPersistent();
+    if (!settings.hidden) session.persistent = drawMove(move, own);
+  }
 
+  // Shows the latest move on the board for a moment: the flash key.
+  function flash() {
+    if (!session || !session.best) return;
+    clearFlash();
+    const { move, own } = session.best;
+    // With the arrow already on the board the flash adds the squares only: chess.com keys
+    // arrows by their squares, so drawing the same arrow twice would remove it with the flash.
+    session.flash = drawMove(move, own, { arrow: !session.persistent, squares: true });
+    session.flashTimer = setTimeout(clearFlash, FLASH_MS);
+  }
+
+  // Draws a move on the board and returns a handle for clearDrawn(). The arrow uses
+  // chess.com's own markings when available; otherwise, or when asked, the from and to
+  // squares are coloured instead.
+  function drawMove(move, own, { arrow = true, squares = false } = {}) {
     const from = move.slice(0, 2);
     const to = move.slice(2, 4);
     const color = own ? COLOUR_OWN : COLOUR_OPPONENT;
-
-    const markings = session.board.game && session.board.game.markings;
-    if (markings && typeof markings.addOne === 'function') {
-      try {
-        const markingKey = markings.addOne({ type: 'arrow', data: { from, to, color, opacity: 0.85 } });
-        if (markingKey) {
-          session.markingKeys.push(markingKey);
-          return;
+    const handle = { markingKeys: [], elements: [] };
+    let needSquares = squares;
+    if (arrow) {
+      const markings = session.board.game && session.board.game.markings;
+      let drawn = false;
+      if (markings && typeof markings.addOne === 'function') {
+        try {
+          const markingKey = markings.addOne({ type: 'arrow', data: { from, to, color, opacity: 0.85 } });
+          if (markingKey) {
+            handle.markingKeys.push(markingKey);
+            drawn = true;
+          }
+        } catch (error) {
+          // fall through to plain highlight squares
         }
-      } catch (error) {
-        // fall through to plain highlight squares
+      }
+      if (!drawn) needSquares = true;
+    }
+    if (needSquares) {
+      for (const [square, opacity] of [
+        [from, 0.45],
+        [to, 0.7],
+      ]) {
+        const element = document.createElement('div');
+        element.className = `highlight cheat-highlight square-${squareCode(square)}`;
+        element.style.cssText = `background-color:${color};opacity:${opacity};pointer-events:none`;
+        session.board.appendChild(element);
+        handle.elements.push(element);
       }
     }
-    for (const [square, opacity] of [
-      [from, 0.45],
-      [to, 0.7],
-    ]) {
-      const element = document.createElement('div');
-      element.className = `highlight cheat-highlight square-${squareCode(square)}`;
-      element.style.cssText = `background-color:${color};opacity:${opacity};pointer-events:none`;
-      session.board.appendChild(element);
-      session.highlightEls.push(element);
-    }
+    return handle;
   }
 
-  function clearMarks() {
-    if (!session) return;
-    const markings = session.board.game && session.board.game.markings;
-    for (const key of session.markingKeys) {
+  function clearDrawn(handle) {
+    if (!handle) return;
+    const markings = session && session.board.game && session.board.game.markings;
+    for (const key of handle.markingKeys) {
       try {
         if (markings) markings.removeOne(key);
       } catch (error) {
         // already gone
       }
     }
-    session.markingKeys = [];
-    for (const element of session.highlightEls) element.remove();
-    session.highlightEls = [];
-    session.shown = null;
+    for (const element of handle.elements) element.remove();
   }
 
+  function clearPersistent() {
+    clearDrawn(session.persistent);
+    session.persistent = null;
+  }
+
+  function clearFlash() {
+    if (!session) return;
+    clearTimeout(session.flashTimer);
+    session.flashTimer = null;
+    clearDrawn(session.flash);
+    session.flash = null;
+  }
+
+  function clearMarks() {
+    if (!session) return;
+    clearPersistent();
+    clearFlash();
+    session.best = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Flash key
+  // ---------------------------------------------------------------------------
+
+  function isTypingTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]') !== null;
+  }
+
+  function onKeyDown(event) {
+    if (ui.capturing) {
+      event.preventDefault();
+      event.stopPropagation();
+      ui.capturing = false;
+      if (event.key !== 'Escape' && !['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) {
+        settings.key = event.key;
+        saveSettings();
+        if (session && session.lastResult) report(session.lastResult);
+      }
+      renderKeyButton();
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
+    if (isTypingTarget(event.target)) return;
+    const pressed = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    const wanted = settings.key.length === 1 ? settings.key.toLowerCase() : settings.key;
+    if (pressed !== wanted) return;
+    event.preventDefault();
+    event.stopPropagation();
+    flash();
+  }
+
+  document.addEventListener('keydown', onKeyDown, true);
+
+  loadSettings();
   ensurePanel();
   setInterval(ensurePanel, PANEL_POLL_MS);
 })();

@@ -1,0 +1,64 @@
+/* Chesscheat control panel, injected above the board. */
+.cheat-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.cheat-panel button {
+  cursor: pointer;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 700;
+  color: #fff;
+  background: #5d9948;
+}
+
+.cheat-panel button.running {
+  background: #c0392b;
+}
+
+.cheat-panel label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.cheat-panel input {
+  width: 4em;
+  padding: 3px 4px;
+  border: 1px solid #777;
+  border-radius: 4px;
+  background: #222;
+  color: #fff;
+  font: inherit;
+}
+
+.cheat-status {
+  flex: 1 1 220px;
+}
+
+.cheat-status.error {
+  color: #ff8a80;
+}
+
+.cheat-engine {
+  font-size: 12px;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.cheat-engine.fallback {
+  color: #ffd54f;
+  opacity: 1;
+}
